@@ -11,7 +11,7 @@ Device parent class contains the following class variables:
     _name:              String  - name of device in ALL_CAPS (DEVICE)
     _opening:           Boolean - whether an attempt to open device was made
     _open:              Boolean - whether device was successfully opened
-    _running:               Boolean - whether device was successfully started
+    _running:           Boolean - whether device was successfully started
     _allow_save:        Boolean - whether data to be collected will be saved
     _has_error:         Boolean - whether error has occurred in open, start,
                                   save, or update method
@@ -40,12 +40,18 @@ __maintainer__ = "Mitchell Black"
 __email__      = "mblack@michiganaerospace.com"
 __status__     = "Development"
 
+import traceback
+import sys
+import numpy as np
+import inspect
+
 from ctypes import *
 from multiprocessing import Lock
 from queue import Queue
 from threading import Thread
-import traceback
-import sys
+from device import Device
+from clockwork import clockwork
+from error_codes import ERROR_CODES
 
 LOOP_FREQ = 1 # Hz
 LOOP_TIME = 1 / LOOP_FREQ
@@ -67,19 +73,30 @@ class Picoscope3207a(Device):
 
     def __init__(self):
         """ __init__ method """
+        super().__init__()
         self._name = "PICOSCOPE3207A"
         self._lib = None
         self._handle = None
         self._run_lock = Lock()
 
+        self._collecting = False
         self._sampling_time = 1E-6
         self._sampling_duration = 100E-6
         self._samples = int(self._sampling_duration / self._sampling_time)
+        
+        self._A_data = np.ones(100)*2
+        self._B_data = np.ones(100)*-2
+        self._t = np.linspace(0,1,100)
+
 
     def _open_device(self):
         self._lib = windll.LoadLibrary("C:\\Program Files\\Pico Technology\\SDK\\lib\\ps3000a.dll")
         c_handle = c_int16()
-        self._lib.ps3000aOpenUnit(byref(c_handle),None)
+        m = self._lib.ps3000aOpenUnit(byref(c_handle),None)
+        if m == 286:
+            m = self._lib.ps3000aChangePowerSource(c_handle,
+                c_int32(m))
+        check_result(m)
         self._handle = c_handle
 
         return True
@@ -157,7 +174,7 @@ class Picoscope3207a(Device):
             m = self._lib.ps3000aRunBlock(self._handle,
                 c_int32(0), # pretrigger samples
                 c_int32(self._samples), # postrigger samples
-                c_uint32(self._timebase)
+                c_uint32(self._timebase),
                 c_int16(0), # overflow - not usde
                 byref(time_indisposed_ms), # time spent collecting data
                 c_uint32(0), # segment index
@@ -169,7 +186,7 @@ class Picoscope3207a(Device):
                 m = self._ps3000aIsReady(self._handle,byref(ready))
                 check_result(m)
 
-            n_samples = c_uint32(self._samples)
+            n_samples = c_uint32(); n_samples.value = self._samples
             overflow = c_int16()
             for i in range(2):
                 start = i*self._samples
@@ -199,6 +216,9 @@ class Picoscope3207a(Device):
                 time_data = np.linspace(0,self._sampling_time,self._samples) + offset_time
 
             data = self._data_buffer
+            self._A_data = [time_data,data[0]]
+            self._B_data = [time_data,data[1]]
+            self._t = time_data
 
             # Place data into queue
             self._data_queue.put(time_data,data)
@@ -227,9 +247,30 @@ class Picoscope3207a(Device):
 
 
     def get_timebase(self,dt):
+        from math import log
         dt *= 1E9
         n = round(log(dt,2))
         return n
+
+    @property
+    def t(self):
+        return self._t
+
+    @property
+    def channel_data(self):
+        return self._A_data,self._B_data
+
+    @property
+    def data1(self):
+        return 1
+
+    @property
+    def data2(self):
+        return 2
+
+    @property
+    def data3(self):
+        return 3
 
 
 

@@ -39,19 +39,19 @@ class PicoscopeGUI(tk.Frame):
         self._labels = {}
 
         # Run Continuously
-        photo = tk.PhotoImage(file="Run_Collection.gif")
+        photo = tk.PhotoImage(file="images\\Start_Collection.gif")
         self._img = photo        
         self._runloop_button = tk.Button(self,width=200,image=photo,borderwidth=0,highlightthickness=0,relief="flat",
         state='disabled',command=lambda: self.click_run_loop())
         self._runloop_button.grid(row=7,padx=0, columnspan=3,column=0,rowspan=1,sticky='nsew')
         
-        photo = tk.PhotoImage(file="Run_Once.gif")
+        photo = tk.PhotoImage(file="images\\Collect_Block.gif")
         self._img2 = photo
         self._runonce_button = tk.Button(self,state='disabled',image=photo,borderwidth=0,highlightthickness=0,relief="flat",
         command=lambda: self.click_run_once()) 
         self._runonce_button.grid(row=7,columnspan=3,column=3,rowspan=1,sticky='nsew')
        
-        photo = tk.PhotoImage(file="Exit.gif")
+        photo = tk.PhotoImage(file="images\\Exit.gif")
         self._exit_button = tk.Button(self,state='normal', image=photo,borderwidth=0,highlightthickness=0,relief="flat",
         command=lambda: self.click_exit()) 
         self._exit_button.img = photo
@@ -63,7 +63,6 @@ class PicoscopeGUI(tk.Frame):
         self._image_frame = image_frame
         
         self.set_label("Picoscope","Connecting","yellow")
-        
         self.set_label("Data Field 1","-- Units","yellow")
         self.set_label("Data Field 2","-- Units","yellow")
         self.set_label("Data Field 3","-- Units","yellow")
@@ -74,11 +73,13 @@ class PicoscopeGUI(tk.Frame):
         self.a.axis('off')
         self.a.autoscale(True)
         f.subplots_adjust(left=0,right=1,bottom=0,top=1)
-        data = {'time':np.linspace(0,1,100),'data':[np.linspace(0,2,100),np.linspace(0,0.5,100)]}
+        data = {'time':np.linspace(0,1,100),'data':np.array([np.linspace(0,2,100),np.linspace(0,0.5,100)]).reshape(100,2)}
         self.plot = self.a.plot('time','data',data=data) # timedata is 1D array, data is 2D array
         # self.plot = self.a.imshow(initial_data,origin='lower')
         
-        self.plot.axes.axis('tight')
+        for p in self.plot:
+            p.axes.axis('tight')
+        # self.plot.axes.axis('tight')
         self.f = f
         
         canvas = FigureCanvasTkAgg(f, self)#image_frame was previously self
@@ -151,12 +152,12 @@ class PicoscopeGUI(tk.Frame):
         self._picoscope.open()
         # laser_on = self._picoscope.laser_on
         # shutter_open = self._picoscope.shutter_open
-        collecting_data = self._picoscope._data_save
+        collecting_data = self._picoscope._collecting
 
         self._picoscope.start()
 
-        start_collection = tk.PhotoImage(file="Start_Collection.gif")
-        stop_collection = tk.PhotoImage(file="Stop_Collection.gif")
+        start_collection = tk.PhotoImage(file="images\\Start_Collection.gif")
+        stop_collection = tk.PhotoImage(file="images\\Stop_Collection.gif")
         
         self._runloop_button.config(state='normal')
         self._runonce_button.config(state='normal')
@@ -178,8 +179,10 @@ class PicoscopeGUI(tk.Frame):
                 else:
                     self.set_label("Picoscope","Offline","red")
 
-            try:    
-                self.plot.set_data(self._picoscope.data) 
+            try:
+                for chan,i in zip(self.plot,range(2)):
+                    chan.set_data(self._picoscope.t,self._picoscope.channel_data[i])
+                # self.plot.set_data(self._picoscope.data) 
                 # shape = self._picoscope.image.shape
                 # max_w = self._picoscope._camera._settings.roiWidth
                 # max_h = self._picoscope._camera._settings.roiHeight
