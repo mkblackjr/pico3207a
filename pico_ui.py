@@ -5,6 +5,7 @@ import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2TkAgg
 from matplotlib.figure import Figure
+from matplotlib.pylab import xlim,ylim
 
 import tkinter as tk
 from tkinter import ttk
@@ -73,7 +74,7 @@ class PicoscopeGUI(tk.Frame):
         self.a.axis('off')
         self.a.autoscale(True)
         f.subplots_adjust(left=0,right=1,bottom=0,top=1)
-        data = {'time':np.linspace(0,1,100),'data':np.array([np.linspace(0,2,100),np.linspace(0,0.5,100)]).reshape(100,2)}
+        data = {'time':np.linspace(0,100E-6,100),'data':np.array([np.linspace(0,2,100),np.linspace(0,0.5,100)]).reshape(100,2)}
         self.plot = self.a.plot('time','data',data=data) # timedata is 1D array, data is 2D array
         # self.plot = self.a.imshow(initial_data,origin='lower')
         
@@ -152,7 +153,6 @@ class PicoscopeGUI(tk.Frame):
         self._picoscope.open()
         # laser_on = self._picoscope.laser_on
         # shutter_open = self._picoscope.shutter_open
-        collecting_data = self._picoscope._collecting
 
         self._picoscope.start()
 
@@ -161,13 +161,13 @@ class PicoscopeGUI(tk.Frame):
         
         self._runloop_button.config(state='normal')
         self._runonce_button.config(state='normal')
-                
-        if not collecting_data:
-            self._runloop_button.config(image=start_collection)
-        else:
-            self._runloop_button.config(image=stop_collection)
             
-        while(self._run):        
+        while(self._run):
+            if not self._picoscope._collecting:
+                self._runloop_button.config(image=start_collection)
+            else:
+                self._runloop_button.config(image=stop_collection) 
+
             self.set_label("Data Field 1","{} Units".format(self._picoscope.data1),"green")
             self.set_label("Data Field 2","{} Units".format(self._picoscope.data2),"green")
             self.set_label("Data Field 3","{} Units".format(self._picoscope.data3),"green")
@@ -182,6 +182,9 @@ class PicoscopeGUI(tk.Frame):
             try:
                 for chan,i in zip(self.plot,range(2)):
                     chan.set_data(self._picoscope.t,self._picoscope.channel_data[i])
+                    xlim(min(self._picoscope.t),max(self._picoscope.t))
+                    ylim(min(self._picoscope.channel_data[i])-1,max(self._picoscope.channel_data[i])+1)
+                    # rescale
                 # self.plot.set_data(self._picoscope.data) 
                 # shape = self._picoscope.image.shape
                 # max_w = self._picoscope._camera._settings.roiWidth
