@@ -159,14 +159,15 @@ class Picoscope3207a(Device):
         self._data = [np.empty(self._samples,dtype=np.int16) for i in range(2)]
         self._data_buffer = [x.ctypes for x in self._data]
         self._timebase = self.get_timebase(self._sampling_time)
-        self.v_range = CHANNEL_RANGE[7]["apivalue"] # 5V range
+        self.v_rangeAPI = CHANNEL_RANGE[7]["apivalue"] # 5V range
+        self.v_range = CHANNEL_RANGE[7]["rangeV"]
         with self._driver_lock:
             for i in range(2):  # two active channels
                 m = self._lib.ps3000aSetChannel(self._handle,
                     c_int32(i), # channel
                     c_int16(1), # enabled
                     c_int32(1), # DC coupling
-                    c_int32(self.v_range), 
+                    c_int32(self.v_rangeAPI), 
                     c_float(0)) # 0V offset
                 check_result(m)
 
@@ -239,8 +240,9 @@ class Picoscope3207a(Device):
 
     def run_loop(self,queue):
         while True:
-            with self._run_lock:
-                self.run(queue)
+            if self._running:
+                with self._run_lock:
+                    self.run(queue)
             time.sleep(0.001) # allow lock to be freed
 
     def run_once(self):
@@ -249,114 +251,120 @@ class Picoscope3207a(Device):
 
     @clockwork(LOOP_TIME)
     def run(self,queue,override=False):
-        if self._collecting or override:
-            # if self._idx == 0:
-            #     self._start_time = time.time()
-            time_indisposed_ms = c_int32()
-            ready = c_int16(0)
-            with self._driver_lock:
-                # Start Run
-                m = self._lib.ps3000aRunBlock(self._handle,
-                    c_int32(0), # pretrigger samples
-                    c_int32(self._samples), # postrigger samples
-                    c_uint32(self._timebase),
-                    c_int16(0), # overflow - not used
-                    byref(time_indisposed_ms), # time spent collecting data
-                    c_uint32(0), # segment index
-                    c_void_p(),
-                    c_void_p())
+        # if self._idx == 0:
+        #     self._start_time = time.time()
+        time_indisposed_ms = c_int32()
+        ready = c_int16(0)
+        with self._driver_lock:
+            # Start Run
+            m = self._lib.ps3000aRunBlock(self._handle,
+                c_int32(0), # pretrigger samples
+                c_int32(self._samples), # postrigger samples
+                c_uint32(self._timebase),
+                c_int16(0), # overflow - not used
+                byref(time_indisposed_ms), # time spent collecting data
+                c_uint32(0), # segment index
+                c_void_p(),
+                c_void_p())
+            check_result(m)
+
+            # Trigger AWG
+            m = self._lib.ps3000aSigGenSoftwareControl(self._handle,c_int16(TRIGGER_ON))
+            check_result(m)
+
+            # Wait for picoscope
+            while ready.value == 0:
+                m = self._lib.ps3000aIsReady(self._handle,byref(ready))
                 check_result(m)
 
-                # Trigger AWG
-                m = self._lib.ps3000aSigGenSoftwareControl(self._handle,c_int16(TRIGGER_ON))
+            # Get Data
+            n_samples = c_uint32(); n_samples.value = self._samples
+            overflow = c_int16()
+            for i in range(2):
+                start = i*self._samples
+                m = self._lib.ps3000aGetValues(self._handle,
+                    c_uint32(start), # start index
+                    byref(n_samples),
+                    c_uint32(1),     # downsample ratio
+                    c_int32(0),      # downsample ratio mode
+                    c_uint32(0),     # segment index
+                    byref(overflow)) # flags if channel has gone over voltage
                 check_result(m)
 
-                # Wait for picoscope
-                while ready.value == 0:
-                    m = self._lib.ps3000aIsReady(self._handle,byref(ready))
-                    check_result(m)
+            # Get Trigger Offset
+            times = c_int64()
+            time_units = c_int32()
+            m = self._lib.ps3000aGetTriggerTimeOffset64(self._handle,
+                byref(times),      # offset time
+                byref(time_units), # offset time unit
+                c_uint32(0))       # segment index
+            check_result(m)
 
-                # Get Data
-                n_samples = c_uint32(); n_samples.value = self._samples
-                overflow = c_int16()
-                for i in range(2):
-                    start = i*self._samples
-                    m = self._lib.ps3000aGetValues(self._handle,
-                        c_uint32(start), # start index
-                        byref(n_samples),
-                        c_uint32(1),     # downsample ratio
-                        c_int32(0),      # downsample ratio mode
-                        c_uint32(0),     # segment index
-                        byref(overflow)) # flags if channel has gone over voltage
-                    check_result(m)
+            # Re-arm AWG Trigger
+            m = self._lib.ps3000aSigGenSoftwareControl(self._handle,c_int32(TRIGGER_OFF))
+            check_result(m)
 
-                # Get Trigger Offset
-                times = c_int64()
-                time_units = c_int32()
-                m = self._lib.ps3000aGetTriggerTimeOffset64(self._handle,
-                    byref(times),      # offset time
-                    byref(time_units), # offset time unit
-                    c_uint32(0))       # segment index
-                check_result(m)
+        offset_time = times.value * 10**(-15+3*time_units.value)
 
-                # Re-arm AWG Trigger
-                m = self._lib.ps3000aSigGenSoftwareControl(self._handle,c_int32(TRIGGER_OFF))
-                check_result(m)
+        time_indisposed_s = time_indisposed_ms.value/1000
+        time_indisposed_s = 0 # To Do: Determine what to do with this
 
-            offset_time = times.value * 10**(-15+3*time_units.value)
+        # Questionable Tactic
+        if time_indisposed_s > 0:
+            time_data = np.linspace(0,time_indisposed_s,self._samples) + offset_time
+        else:
+            time_data = np.linspace(0,self._sampling_duration,self._samples) + offset_time
 
-            time_indisposed_ms = time_indisposed_ms.value
+        data = np.array(self._data) * self.v_range / MAX_EXT
+        self._A_data = np.array(data[0])
+        self._B_data = np.array(data[1])
+        self._t = time_data
+        print(max(data[0]))
 
-            # Questionable Tactic
-            if time_indisposed_ms > 0:
-                time_data = np.linspace(0,time_indisposed_ms,self._samples) + offset_time
-            else:
-                time_data = np.linspace(0,self._sampling_duration,self._samples) + offset_time
-
-            data = np.array(self._data) * self.v_range / MAX_EXT
-            self._A_data = np.array(data[0])
-            self._B_data = np.array(data[1])
-            self._t = time_data
-
-            # Place data into queue
-            queue.put((time_data,data))
-            # self._idx += 1
+        # Place data into queue
+        queue.put((time_data,data,override))
+        # self._idx += 1
 
     def process(self,get_queue,put_queue):
         # idx = 0
 
         while True:
             try:
-                t,v = get_queue.get()
+                t,v,override = get_queue.get()
 
                 # do something to process data
                 # if idx != 0:
                 #     t += idx*self._sampling_duration
 
-                put_queue.put((t,v))
+                put_queue.put((t,v,override))
             except:
                 traceback.print_exc(file=sys.stdout)
             # idx += 1
 
 
     def save(self,queue):
-        filename = datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S') + ".csv"
-        with open(filename,'w',newline='') as csvfile:
-            writer = csv.writer(csvfile,delimiter=',')
-            writer.writerow(["Time (sec)","Channel A (V)","Channel B (V)"])
+        filename = "data\\" + datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S') + ".csv"
+        idx = 0
 
         while True:
             try:
-                times,voltages = queue.get()
+                times,voltages,override = queue.get()
 
                 # save in csv
-                with open(filename,'a',newline='') as csvfile:
-                    writer = csv.writer(csvfile,delimiter=',')
-                    for t,v1,v2 in zip(times,voltages[0],voltages[1]):
-                        writer.writerow([str(t),str(v1),str(v2)])
+                if self._collecting or override:
+                    if idx == 0:
+                        with open(filename,'w',newline='') as csvfile:
+                            writer = csv.writer(csvfile,delimiter=',')
+                            writer.writerow(["Time (sec)","Channel A (V)","Channel B (V)"])
+                    with open(filename,'a',newline='') as csvfile:
+                        writer = csv.writer(csvfile,delimiter=',')
+                        for t,v1,v2 in zip(times,voltages[0],voltages[1]):
+                            writer.writerow([str(t),str(v1),str(v2)])
                 
             except:
                 traceback.print_exc(file=sys.stdout)
+
+            idx += 1
 
 
     def get_timebase(self,dt):
@@ -366,7 +374,6 @@ class Picoscope3207a(Device):
         else:
             dt *= 1E9
             n = round(log(dt,2))
-        print((n-2)/125000000)
         return n
 
     @property

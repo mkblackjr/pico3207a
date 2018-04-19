@@ -70,11 +70,11 @@ class PicoscopeGUI(tk.Frame):
         
         f = Figure(figsize=(5,5), dpi=100)
         self.a = f.add_subplot(111)
-        self.a.set_adjustable('box-forced')
+        # self.a.set_adjustable('box-forced')
         self.a.axis('off')
         self.a.autoscale(True)
         f.subplots_adjust(left=0,right=1,bottom=0,top=1)
-        data = {'time':np.linspace(0,100E-6,100),'data':np.array([np.linspace(0,2,100),np.linspace(0,0.5,100)]).reshape(100,2)}
+        data = {'time':np.linspace(0,100E-6,100),'data':np.array([np.linspace(-2,2,100),np.linspace(-0.5,0.5,100)]).reshape(100,2)}
         self.plot = self.a.plot('time','data',data=data) # timedata is 1D array, data is 2D array
         # self.plot = self.a.imshow(initial_data,origin='lower')
         
@@ -84,7 +84,7 @@ class PicoscopeGUI(tk.Frame):
         self.f = f
         
         canvas = FigureCanvasTkAgg(f, self)#image_frame was previously self
-        canvas.show()
+        canvas.draw()
         
         #canvas.get_tk_widget().pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True)
         
