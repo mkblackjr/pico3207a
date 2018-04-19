@@ -15,6 +15,7 @@ Device parent class contains the following class variables:
     _allow_save:        Boolean - whether data to be collected will be saved
     _has_error:         Boolean - whether error has occurred in open, start,
                                   save, or update method
+    _data_queue:        queue.Queue - Queue for data
     _has_save_thread:   Boolean - whether device uses separate save thread
     _has_update_thread: Boolean - whether device uses separate update thread
     _lock:              multiprocessing.Lock - lock used start/stop methods 
@@ -27,14 +28,16 @@ Device parent class contains the following public class methods:
     close():            Closes out the device
     start():            Starts updating and saving methods
     stop():             Stops updating and saving methods
-    update():           Runs _update_device method on a background thread
+    restart():          Calls close() and open() with a delay in between
+    toggle_save():      Toggles the boolean value _allow_save
+    check_error():      Sets  _open, _running, _allow_save to False if error
     save():             Runs _save_device method on a background thread
-    create_directory(): Creates new directories for saving device data
+    update():           Runs _update_device method on a background thread
 """
 
 __author__     = "Mitchell Black"
 __copyright__  = "Copyright 2018, Michigan Aerospace Corporation"
-__credits__    = ["Mitchell Black", "Picotech Support", "Picotech Github"]
+__credits__    = ["Picotech Support", "Picotech Github"]
 __version__    = "1.0"
 __maintainer__ = "Mitchell Black"
 __email__      = "mblack@michiganaerospace.com"
@@ -52,10 +55,13 @@ from ctypes import *
 from multiprocessing import Lock
 from queue import Queue
 from threading import Thread
+from math import log
+
 from device import Device
 from clockwork import clockwork
 from error_codes import ERROR_CODES
 
+# Module-level variables
 LOOP_FREQ = 1 # Hz
 LOOP_TIME = 1 / LOOP_FREQ
 MAX_EXT = 32767
@@ -103,21 +109,22 @@ class Picoscope3207a(Device):
         self._A_data = np.ones(100)*2
         self._B_data = np.ones(100)*-2
         self._t = np.linspace(0,100E-6,100)
+        self.distance = None
 
         self._process_queue = Queue()
         self._save_queue = Queue()
 
     def _open_device(self):
-        """ _open_device(): called by the parent Device class during the open()
-        method. Loads the API functions and establishes communication to the 
-        picoscope via the OpenUnit API function. Also switches the power source
-        to USB Power if necessary.
+        """ Called by the parent Device class during the open() method. Loads 
+        the API functions and establishes communication to the picoscope via 
+        the OpenUnit API function. Also switches the power source to USB Power 
+        if necessary.
 
         Does not accept any arguments.
 
         Returns True if successful.
         """
-        self._lib = windll.LoadLibrary("C:\\Program Files\\Pico Technology\\SDK\\lib\\ps3000a.dll")
+        self._lib = windll.LoadLibrary("lib\\ps3000a.dll")
         c_handle = c_int16()
         with self._driver_lock:
             m = self._lib.ps3000aOpenUnit(byref(c_handle),None)
@@ -130,8 +137,8 @@ class Picoscope3207a(Device):
         return True
 
     def _close_device(self):
-        """ _close_device(): called bu the parent Device class during the close()
-        method. Disconnects from the picoscope via a call to the CloseUnit API
+        """ Called by the parent Device class during the close() method. 
+        Disconnects from the picoscope via a call to the CloseUnit API 
         function.
 
         Does not accept any arguments.
@@ -143,11 +150,10 @@ class Picoscope3207a(Device):
         check_result(m)
 
     def _start_device(self):
-        """ _start_device(): called by the parent Device class during the 
-        start() method. Establishes the data and data_buffer class variables.
-        Sets up the input channels, sets the Trigger, and sets the memory
-        locations. Sets the Arbitrary Waveform Generator to output a square 
-        wave of 40 kHz.
+        """ Called by the parent Device class during the start() method. 
+        Establishes the data and data_buffer class variables. Sets up the 
+        input channels, sets the Trigger, and sets the memory locations. Sets
+        the Arbitrary Waveform Generator to output a square wave of 40 kHz.
 
         Also responsible for starting the save, process, and collect threads in
         coordination with their respective queues.
@@ -231,14 +237,25 @@ class Picoscope3207a(Device):
         return True
 
     def _stop_device(self):
+        """ Called by the parent Device class during the stop() method. Stops 
+        collection mode via call to Stop API function.
+
+        Does not accept any arguments.
+
+        Does not return any values.
+        """
         with self._driver_lock:
             m = self._lib.ps3000aStop(self._handle)
         check_result(m)
 
-    def toggle_run(self):
-        self._collecting = not self._collecting
-
     def run_loop(self,queue):
+        """ Target of the _collect_thread. Makes calls to the run() method to 
+        acquire data.
+
+        queue: queue.Queue() - self._process_queue to which data is added.
+
+        Does not return any values.
+        """
         while True:
             if self._running:
                 with self._run_lock:
@@ -246,11 +263,28 @@ class Picoscope3207a(Device):
             time.sleep(0.001) # allow lock to be freed
 
     def run_once(self):
-        with self._run_lock:
-            self.run(self._process_queue,True)
+        """ Makes one call to the run() method.
 
-    @clockwork(LOOP_TIME)
+        Does not accept any arguments.
+
+        Does not return any values.
+        """
+        with self._run_lock:
+            self.run(self._process_queue,True) # True: override flag for saving
+
+    @clockwork(LOOP_TIME) # forces method below to execute in LOOP_TIME seconds
     def run(self,queue,override=False):
+        """ Called to acquire data in Block mode. The following algorithm is 
+        implemented: RunBlock -> SoftwareTriggerOn -> IsReady? -> GetValues ->
+        GetTriggerTimeOffsets -> SoftwareTriggerOff -> add data to 
+        _process_queue.
+
+        queue: queue.Queue() - self._process_queue to which data is added for
+               processing
+        override: flag for save() method - save if run_once() method is called
+
+        Does not return any values.
+        """
         # if self._idx == 0:
         #     self._start_time = time.time()
         time_indisposed_ms = c_int32()
@@ -326,6 +360,15 @@ class Picoscope3207a(Device):
         # self._idx += 1
 
     def process(self,get_queue,put_queue):
+        """ Target of _process_thread. Processes the raw data collected from
+        the picoscope.
+
+        get_queue: queue.Queue() - self._process_queue from which data is taken
+        put_queue: queue.Queue() - self._save_queue to which data is added 
+                   for saving
+
+        Does not return any values.
+        """
         # idx = 0
 
         while True:
@@ -333,16 +376,21 @@ class Picoscope3207a(Device):
                 t,v,override = get_queue.get()
 
                 # do something to process data
-                # if idx != 0:
-                #     t += idx*self._sampling_duration
+                self.distance = v[0][1]
+
 
                 put_queue.put((t,v,override))
             except:
                 traceback.print_exc(file=sys.stdout)
             # idx += 1
 
-
     def save(self,queue):
+        """ Target of _save_thread. Saves the processed data to a csv file.
+
+        queue: queue.Queue() - self._save_queue from which data is taken
+
+        Does not return any values.
+        """
         filename = "data\\" + datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S') + ".csv"
         idx = 0
 
@@ -366,9 +414,14 @@ class Picoscope3207a(Device):
 
             idx += 1
 
-
     def get_timebase(self,dt):
-        from math import log
+        """ Converts a delta_t (sampling time) into a timebase readable by the
+        picoscope.
+
+        dt: sampling time
+
+        returns n: timebase
+        """
         if dt > 4E-9:
             n = int(dt*125E6 + 2)
         else:
@@ -381,250 +434,23 @@ class Picoscope3207a(Device):
         return self._t
 
     @property
-    def channel_data(self):
+    def channel_data(self): 
         return self._A_data,self._B_data
 
     @property
     def data1(self):
-        return 1
+        """ This is read by the pico_ui.py script """ 
+        return round(max(self._A_data),3)
 
     @property
     def data2(self):
-        return 2
+        """ This is read by the pico_ui.py script """
+        return 2 # Insert relevant data field here
 
     @property
     def data3(self):
-        return 3
-
-
-
-###############################################################################
-############################## Picoscope Channel ##############################
-###############################################################################
-
-class Channel():
-    """ Picoscope Channel """
-    CHANNEL_RANGE = [\
-        {"rangeV": 20E-3,  "apivalue": 1,  "rangeStr": "20 mV"},
-        {"rangeV": 50E-3,  "apivalue": 2,  "rangeStr": "50 mV"},
-        {"rangeV": 100E-3, "apivalue": 3,  "rangeStr": "100 mV"},
-        {"rangeV": 200E-3, "apivalue": 4,  "rangeStr": "200 mV"},
-        {"rangeV": 500E-3, "apivalue": 5,  "rangeStr": "500 mV"},
-        {"rangeV": 1.0,    "apivalue": 6,  "rangeStr": "1 V"},
-        {"rangeV": 2.0,    "apivalue": 7,  "rangeStr": "2 V"},
-        {"rangeV": 5.0,    "apivalue": 8,  "rangeStr": "5 V"},
-        {"rangeV": 10.0,   "apivalue": 9,  "rangeStr": "10 V"},
-        {"rangeV": 20.0,   "apivalue": 10, "rangeStr": "20 V"}]
-
-    KEY = {'A':0,'B':1}
-
-    max_samples = 0
-
-    def __init__(self,handle,identity,dt,enabled=False):
-        self._lib = LIB
-        self._handle = handle
-
-        self.id = identity
-        self.enabled = enabled
-        self.v_range = None
-        self.v_offset = None
-        self.coupling = 1 # DC, AC = 0
-        self.segment = 0
-        self.trigger = False
-        self.timestep = dt
-
-        # Initialize Channel to Off
-        m = self._lib.ps2000aSetChannel(self._handle,
-            c_int32(self.id),
-            c_int16(0),
-            c_int32(self.coupling),
-            c_int32(5),
-            c_float(0))
-        check_result(m)
-
-        #   # Get Channel Information
-        # ranges = c_int32*4
-        # length = c_int32(4)
-        # i = 0
-        # for key,chan in self._channels.keys():
-        #     m = self._lib.ps2000aGetChannelInformation(self._handle,
-        #         c_int32(0), # PS2000A_CHANNEL_INFO
-        #         c_int32(0), # probe: not used, must be set to 0
-        #         byref(ranges[i]),
-        #         byref(length),
-        #         c_int32(chan['id']))
-        #     i += 1
-
-    def enabled(self):
-        self.enabled = True
-
-    def disable(self):
-        self.enabled = False
-
-    def set(self,vr,vo):
-        self.v_range = vr
-        self.v_offset = vo        
-
-        for v in self.CHANNEL_RANGE:
-            if v["rangeV"] == vr:
-                v_api = v["apivalue"]
-                break
-
-        if v_api is None:
-            print("Channel {}: Voltage Range not an Option!".format(self.id))
-        else: 
-            self._v_api = v_api
-
-        m = self._lib.ps2000aSetChannel(self._handle,
-            c_int32(self.id),
-            c_int16(self.enabled),
-            c_int32(self.coupling),
-            c_int32(self._v_api),
-            c_float(vo))
-        check_result(m)
-
-        if self.enabled:
-            print("Channel {} Enabled!".format(self.id))
-
-    def set_trigger(self,threshold_v,direction,delay=0,auto=2000):
-        threshold_adc = int(threshold_v/self.v_range * MAX_16_BIT)
-
-        if not isinstance(direction,int):
-            if direction is "Above":
-                direction = 0
-            elif direction is "Below":
-                direction = 1
-            elif direction is "Rising":
-                direction = 2
-            elif direction is "Falling":
-                direction = 3
-            elif direction is "RiseOrFall":
-                direction = 4
-
-        m = self._lib.ps2000aSetSimpleTrigger(self._handle,
-            c_int16(self.enabled),
-            c_int32(self.id),
-            c_int16(threshold_adc),
-            c_int32(direction),
-            c_uint32(delay),
-            c_int16(auto))
-        check_result(m)
-
-###############################################################################
-######################## Arbitrary Waveform Generator #########################
-###############################################################################
-
-class AWG():
-    """ Picoscope Arbitrary Waveform Generator """
-    DDS_Freq = 20E6
-    AWGPhaseAccumulatorSize = 2**32
-    AWGBufferSize = 32768
-
-    def __init__(self,handle,duration,dt):
-        self._lib = LIB
-        self._handle = handle
-
-        self.waveform = None
-        self.v_offset = 1
-        self.pk_to_pk = 2
-        self.delta_phase = None
-        self.phase_increment = 0
-        self.dwell_count = 0
-        self.sweep_type = 0
-        self.extra_operations = 0
-        self.index_mode = 0
-        self.shots = 1
-        self.sweeps = 0
-        self.trigger_source = None
-        self.trigger_type = None
-        self.ext_in = 0
-        self.trigger = False
-
-        self.timestep = dt
-        self.duration = duration
-        self.pulse_width = 100E-7
-        self.pulse_location = 0.25
-
-    def get_waveform(self,wtype='Pulse',width=100E-9,location=0.25):
-        # Get AWG Information
-        minWaveform = c_int16()
-        maxWaveform = c_int16()
-        minWaveformSize = c_uint32()
-        maxWaveformSize = c_uint32()
-        m = self._lib.ps2000aSigGenArbitraryMinMaxValues(self._handle,
-            byref(minWaveform),
-            byref(maxWaveform),
-            byref(minWaveformSize),
-            byref(maxWaveformSize))
-        check_result(m)
-
-        if wtype is not 'Pulse':
-            print("Waveform Type Not Yet Supported")
-            return 0
-        else:
-            duration = self.duration
-            w_len = int(min(maxWaveformSize.value,duration/self.timestep))
-            idx1 = int(w_len*(location - width/(2*duration)))
-            idx2 = int(w_len*(location + width/(2*duration))) - 1
-            waveform = np.array([MIN_16_BIT if (i < idx1 or i >= idx2) else MAX_16_BIT for i in range(w_len)],dtype=c_int16)
-
-        return waveform,w_len
-
-    def set(self,trgsrc,trgtype):
-        self.waveform,self.length = self.get_waveform('Pulse',self.pulse_width,self.pulse_location)
-
-        output_freq = 1/self.duration
-        self.delta_phase = int((output_freq*self.AWGPhaseAccumulatorSize*self.length) / \
-            (self.DDS_Freq * self.AWGBufferSize)) # 1 waveform per shot
-        waveformPtr = self.waveform.ctypes
-
-        if not isinstance(trgsrc,int):
-            if trgsrc is "None":
-                self.trigger_source = 0
-            elif trgsrc is "ScopeTrig":
-                self.trigger_source = 1
-            elif trgsrc is "AuxIn":
-                self.trigger_source = 2
-            elif trgsrc is "ExtIn":
-                self.trigger_source = 3
-            elif trgsrc is "SoftTrig":
-                self.trigger_source = 4
-            elif trgsrc is "TriggerRaw":
-                self.trigger_source = 5
-        else:
-            self.trigger_source = trgsrc
-
-        if not isinstance(trgtype,int):
-            if trgtype is "Rising":
-                self.trigger_type = 0
-            elif trgtype is "Falling":
-                self.trigger_type = 1
-            elif trgtype is "GateHigh":
-                self.trigger_type = 2
-            elif trgtype is "GateLow":
-                self.trigger_type = 3
-        else:
-            self.trigger_type = trgtype
-
-        # Send AWG Info to Picoscope
-        m = self._lib.ps2000aSetSigGenArbitrary(self._handle,
-            c_int32(int(self.v_offset*1E6)), 
-            c_uint32(int(self.pk_to_pk*1E6)),
-            c_uint32(self.delta_phase), # start delta phase
-            c_uint32(self.delta_phase), # stop delta phase
-            c_uint32(self.phase_increment), # delta phase increment
-            c_uint32(self.dwell_count), # dwell count
-            waveformPtr, # arbitrary waveform
-            c_int32(self.length), # arbitrary waveform size
-            c_int32(self.sweep_type), # sweep type for delta phase
-            c_int32(self.extra_operations), # extra operations
-            c_int32(self.index_mode), 
-            c_uint32(self.shots), 
-            c_uint32(self.sweeps),
-            c_int32(self.trigger_type),
-            c_int32(self.trigger_source),
-            c_int16(self.ext_in)) # extIn threshold
-        check_result(m)
+        """ This is read by the pico_ui.py script """
+        return 3 # Insert relevant data field here
 
 ###############################################################################
 ############################## Helper Functions ###############################

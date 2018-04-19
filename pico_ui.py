@@ -64,7 +64,7 @@ class PicoscopeGUI(tk.Frame):
         self._image_frame = image_frame
         
         self.set_label("Picoscope","Connecting","yellow")
-        self.set_label("Data Field 1","-- Units","yellow")
+        self.set_label("Chan A Max","-- V","yellow")
         self.set_label("Data Field 2","-- Units","yellow")
         self.set_label("Data Field 3","-- Units","yellow")
         
@@ -141,7 +141,7 @@ class PicoscopeGUI(tk.Frame):
         self._label_val.grid_forget()
     
     def click_run_loop(self):
-        self._picoscope.toggle_run()
+        self._picoscope.toggle_save()
         
     def click_run_once(self):
         self._picoscope.run_once()
@@ -168,7 +168,7 @@ class PicoscopeGUI(tk.Frame):
             else:
                 self._runloop_button.config(image=stop_collection) 
 
-            self.set_label("Data Field 1","{} Units".format(self._picoscope.data1),"green")
+            self.set_label("Chan A Max","{} V".format(self._picoscope.data1),"green")
             self.set_label("Data Field 2","{} Units".format(self._picoscope.data2),"green")
             self.set_label("Data Field 3","{} Units".format(self._picoscope.data3),"green")
             
